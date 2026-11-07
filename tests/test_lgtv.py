@@ -425,8 +425,10 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o700)
             with open(os.path.join(target, "STATUS")) as f:
-                self.assertEqual(f.readline().strip(), "PARTIAL")  # the fake TV lacks most categories
-            self.assertIn("Still to back up through the menu", run.stdout)
+                status = f.read().splitlines()
+                self.assertEqual(status[0], "network=PARTIAL")  # the fake TV lacks most categories
+                self.assertTrue(status[-1].startswith("menu=INCOMPLETE"), status)
+            self.assertIn("menu-only settings are NOT backed up yet", run.stdout)
             self.assertIn("viewing-information", run.stdout)
             path = os.path.join(target, "settings-general.json")
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
@@ -448,7 +450,7 @@ class CliAgainstFakeTvTest(unittest.TestCase):
                 self.assertIn("BACKUP FAILED", run.stderr)
                 self.assertFalse(os.path.lexists(os.path.join(root, "latest")))
                 with open(os.path.join(target, "STATUS")) as f:
-                    self.assertTrue(f.read().startswith("FAILED"))
+                    self.assertTrue(f.read().startswith("network=FAILED"))
         finally:
             self.tv.settings_broken = False
 

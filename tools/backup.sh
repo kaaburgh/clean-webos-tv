@@ -62,7 +62,7 @@ fi
 
 if [[ ${#failed_essential[@]} -gt 0 ]]; then
   {
-    echo "FAILED"
+    echo "network=FAILED"
     echo "essential settings not captured: ${failed_essential[*]}"
     echo "captured: ${captured[*]:-none}"
   } >"$dir/STATUS"
@@ -72,17 +72,20 @@ if [[ ${#failed_essential[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#missing[@]} -gt 0 ]]; then
-  printf 'PARTIAL\nnot captured: %s\n' "${missing[*]}" >"$dir/STATUS"
-  echo "backup is PARTIAL: ${missing[*]} not captured (essential categories are in)"
+  printf 'network=PARTIAL\nnot captured: %s\n' "${missing[*]}" >"$dir/STATUS"
+  echo "network backup is PARTIAL: ${missing[*]} not captured (essential categories are in)"
 else
-  echo "OK" >"$dir/STATUS"
+  echo "network=OK" >"$dir/STATUS"
 fi
 ln -sfn "$(basename "$dir")" "$(dirname "$dir")/latest"
-echo "backup written to $dir"
+echo "network backup written to $dir"
 
 # Settings the network API does not return still need the menu backup: the agent walks the menu,
 # takes a screenshot of each item and records it with tools/menu_backup.py (PROMPT.md).
+# network=OK does not cover them: a menu item may be changed only when
+# `menu_backup.py has <backup> <id>` succeeds, which needs its recorded baseline.
 mkdir -p "$dir/menu"
-echo
-echo "Still to back up through the menu (tools/menu_backup.py record $dir <id> <value> <screenshot>):"
+python3 "$here/menu_backup.py" status "$dir" >>"$dir/STATUS" || true
+echo "$(tail -n1 "$dir/STATUS"): menu-only settings are NOT backed up yet."
+echo "Record each with tools/menu_backup.py record $dir <id> <value> <screenshot>; still missing:"
 python3 "$here/menu_backup.py" missing "$dir" || true
