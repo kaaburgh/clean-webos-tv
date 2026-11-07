@@ -27,9 +27,11 @@ import argparse
 import asyncio
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 CONFIG_DIR = os.environ.get("CLEAN_WEBOS_TV_HOME") or os.path.join(os.path.expanduser("~"), ".config", "clean-webos-tv")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
@@ -145,13 +147,46 @@ async def get_settings(c, category, keys):
     return res.get("settings", {})
 
 
-async def take_screenshot(c, path):
+class _NoScreenshotRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not follow the TV's screenshot URL to an untrusted host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def download_screenshot(uri, expected_host):
+    """Download only from the paired TV host; accept its local HTTPS certificate.
+
+    webOS may return a self-signed HTTPS imageUri for tv/executeOneShot. Disabling
+    verification is confined to this one request, and HTTP redirects are forbidden.
+    """
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        raise SystemExit("refusing malformed TV screenshot URL")
+    if (parsed.scheme not in ("http", "https") or
+            parsed.hostname != expected_host.lower() or
+            parsed.username is not None or parsed.password is not None):
+        raise SystemExit("refusing screenshot URL: expected HTTP(S) on the paired TV host")
+
+    context = ssl.create_default_context()
+    if parsed.scheme == "https":
+        # The TV uses a locally issued certificate: scope the exception to its image URL.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context), _NoScreenshotRedirect(),
+    )
+    with opener.open(uri, timeout=20) as response:
+        return response.read()
+
+
+async def take_screenshot(c, path, expected_host):
     res = await c.request("tv/executeOneShot")
     uri = res.get("imageUri")
     if not uri:
         raise SystemExit(f"TV returned no imageUri: {res}")
-    with urllib.request.urlopen(uri, timeout=20) as r:
-        data = r.read()
+    data = download_screenshot(uri, expected_host)
     if not data:
         print("empty screenshot (protected content or Live TV?)", file=sys.stderr)
         return 1
@@ -239,7 +274,7 @@ async def dispatch(c, args):
         if args.keys:
             await press(c, args.keys, args.delay)
             await asyncio.sleep(args.settle)
-        return await take_screenshot(c, args.path)
+        return await take_screenshot(c, args.path, args.host or os.environ["TV_HOST"])
     elif cmd == "settings-get":
         dump(await get_settings(c, args.category, args.keys))
     elif cmd == "settings-set":
