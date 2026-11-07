@@ -95,7 +95,14 @@ class FakeTv:
             out = {"returnValue": True}
             if uri == "settings/getSystemSettings":
                 cat = self.settings.get(p["category"], {})
-                out["settings"] = {k: cat[k] for k in p.get("keys", cat) if k in cat}
+                # Like a real G5: no keys is an error, and so is any key this firmware lacks.
+                bad = "keys are mandatory." if not p.get("keys") else (
+                    "unknown key" if any(k not in cat for k in p["keys"]) else None)
+                if bad:
+                    await ws.send(json.dumps({"type": "error", "id": msg["id"], "error": "500 Application error",
+                                              "payload": {"returnValue": False, "errorCode": -1000, "errorText": bad}}))
+                    continue
+                out["settings"] = {k: cat[k] for k in p["keys"]}
             elif uri == "com.webos.applicationManager/listApps":
                 out["apps"] = [{"id": "com.lg.ads", "title": "Ads", "removable": True, "systemApp": False}]
             elif uri == "system.notifications/createAlert":
@@ -187,6 +194,32 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             code, _, err = self.cli("restore", log)
         self.assertEqual(code, 1)
         self.assertIn("NOT RESTORED option.liveplus", err)
+
+    def test_02d_settings_get_without_keys_uses_known_keys_and_skips_missing(self):
+        self.cli("pair")
+        with tempfile.TemporaryDirectory() as d:
+            keys = os.path.join(d, "keys.json")
+            with open(keys, "w") as f:
+                json.dump({"_source": "test", "general": ["homePromotion", "contentRecommendation", "goneKey"]}, f)
+            old = lgtv.KEYS_FILE
+            lgtv.KEYS_FILE = keys
+            try:
+                code, out, err = self.cli("settings-get", "general")
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(out), {"homePromotion": "on", "contentRecommendation": "on"})
+                self.assertIn("general.goneKey: not readable", err)
+                with self.assertRaises(SystemExit) as ctx:
+                    self.cli("settings-get", "nosuchcategory")
+                self.assertIn("pass keys explicitly", str(ctx.exception))
+            finally:
+                lgtv.KEYS_FILE = old
+
+    def test_02e_bundled_g5_keys_cover_privacy_settings(self):
+        with open(lgtv.KEYS_FILE) as f:
+            table = json.load(f)
+        for cat, key in (("general", "homeAutoLaunch"), ("general", "homePromotion"), ("option", "livePlus"),
+                         ("other", "contentRecommendation")):
+            self.assertIn(key, table[cat])
 
     def test_03_settings_set_requires_log(self):
         with self.assertRaises(SystemExit):

@@ -14,13 +14,15 @@ lgtv info >"$dir/info.json"
 lgtv apps >"$dir/launch-points.json"
 lgtv apps --all >"$dir/apps-all.json"
 
-# Categories the settings service is known to answer. Without keys some firmware returns the
-# whole category, some refuses: both outcomes are recorded, neither stops the backup.
-for category in general option picture sound network time aiPicture lock; do
-  if ! lgtv settings-get "$category" >"$dir/settings-$category.json" 2>"$dir/settings-$category.err"; then
-    echo "settings $category: not readable without keys (see $dir/settings-$category.err)"
+# The settings service refuses reads without explicit keys, so lgtv.py asks for every key known
+# for the category (tools/settings-keys/G5.json, override with TV_SETTINGS_KEYS). Keys this
+# firmware lacks are skipped and listed in the .err file; a failed category does not stop the backup.
+for category in general option other picture sound network time lock caption channel aiPicture \
+                aspectRatio push support voiceframework timer; do
+  if lgtv settings-get "$category" >"$dir/settings-$category.json" 2>"$dir/settings-$category.err"; then
+    [[ -s "$dir/settings-$category.err" ]] || rm -f "$dir/settings-$category.err"
   else
-    rm -f "$dir/settings-$category.err"
+    echo "settings $category: not readable (see $dir/settings-$category.err)"
   fi
 done
 

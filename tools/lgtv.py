@@ -14,7 +14,7 @@ The first command shows a pairing prompt on the TV; the key is kept in
   lgtv.py close <appId>                     close an app
   lgtv.py button HOME DOWN ENTER            press remote buttons (names: lgtv.py buttons)
   lgtv.py screenshot shots/01.jpg [KEYS..]  press keys, then capture the whole screen
-  lgtv.py settings-get <category> [keys..]  read system settings
+  lgtv.py settings-get <category> [keys..]  read settings (no keys: all known keys, tools/settings-keys/)
   lgtv.py settings-set <category> k=v ..    change settings, logged for restore (--log)
   lgtv.py restore <changes.jsonl>           undo every logged settings change
   lgtv.py ssap <uri> [JSON]                 raw SSAP request (prints the response)
@@ -137,12 +137,43 @@ async def client(host, pair_ok=True):
     return c
 
 
-async def get_settings(c, category, keys):
-    payload = {"category": category}
-    if keys:
-        payload["keys"] = list(keys)
-    res = await c.request("settings/getSystemSettings", payload)
-    return res.get("settings", {})
+KEYS_FILE = os.environ.get("TV_SETTINGS_KEYS") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "settings-keys", "G5.json")
+
+
+def known_keys(category):
+    """Keys the firmware is known to have in a category: the TV refuses a read without `keys`."""
+    try:
+        with open(KEYS_FILE, encoding="utf-8") as f:
+            table = json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"no keys given and no key list at {KEYS_FILE}; pass keys or set TV_SETTINGS_KEYS")
+    if category not in table or category.startswith("_"):
+        cats = ", ".join(k for k in table if not k.startswith("_"))
+        raise SystemExit(f"category {category!r} is not in {KEYS_FILE}; pass keys explicitly. Known: {cats}")
+    return table[category]
+
+
+async def get_settings(c, category, keys, report_skipped=True):
+    """Read settings; with no keys, read every key known for the category.
+
+    A batch that the TV rejects (some key unknown to this firmware) is retried key by key, and the
+    keys it still rejects are skipped, so one stale key never hides the rest.
+    """
+    from bscpylgtv.exceptions import PyLGTVCmdError, PyLGTVCmdException
+    keys = list(keys) if keys else known_keys(category)
+    try:
+        res = await c.request("settings/getSystemSettings", {"category": category, "keys": keys})
+        return res.get("settings", {})
+    except (PyLGTVCmdError, PyLGTVCmdException):  # the TV answered with an error, not a lost connection
+        if len(keys) == 1:
+            if report_skipped:
+                print(f"  {category}.{keys[0]}: not readable on this TV, skipped", file=sys.stderr)
+            return {}
+    out = {}
+    for key in keys:
+        out.update(await get_settings(c, category, [key], report_skipped))
+    return out
 
 
 async def take_screenshot(c, path):
