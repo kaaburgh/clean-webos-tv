@@ -79,3 +79,10 @@ else
 fi
 ln -sfn "$(basename "$dir")" "$(dirname "$dir")/latest"
 echo "backup written to $dir"
+
+# Settings the network API does not return still need the menu backup: the agent walks the menu,
+# takes a screenshot of each item and records it with tools/menu_backup.py (PROMPT.md).
+mkdir -p "$dir/menu"
+echo
+echo "Still to back up through the menu (tools/menu_backup.py record $dir <id> <value> <screenshot>):"
+python3 "$here/menu_backup.py" missing "$dir" || true

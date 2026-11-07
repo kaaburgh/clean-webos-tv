@@ -426,6 +426,8 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o700)
             with open(os.path.join(target, "STATUS")) as f:
                 self.assertEqual(f.readline().strip(), "PARTIAL")  # the fake TV lacks most categories
+            self.assertIn("Still to back up through the menu", run.stdout)
+            self.assertIn("viewing-information", run.stdout)
             path = os.path.join(target, "settings-general.json")
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             with open(path) as f:

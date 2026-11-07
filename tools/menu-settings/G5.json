@@ -1,0 +1,23 @@
+{
+ "_source": "Privacy settings an LG G5 (webOS 10.2) does not return over the network API (measured 2026-11-07). They are backed up by navigating the menu with the remote and reading a screenshot. Menu paths are hints for webOS 24/25 and differ by region and firmware: the screenshot, not this file, is the record.",
+ "settings": [
+  {"id": "viewing-information", "key": "option.watchedListCollection", "name": "Соглашение «Информация о просмотре» (сбор истории просмотра)",
+   "menu": "Настройки → Поддержка → Конфиденциальность и условия → Пользовательские соглашения"},
+  {"id": "voice-information", "key": null, "name": "Соглашение «Голосовая информация»",
+   "menu": "Настройки → Поддержка → Конфиденциальность и условия → Пользовательские соглашения"},
+  {"id": "interest-based-ads", "key": "general.personalRecommend", "name": "Рекомендации и реклама по интересам",
+   "menu": "Пользовательские соглашения, или Общие → Система → Дополнительные настройки → Реклама"},
+  {"id": "ad-tracking", "key": "general.adCookie", "name": "Ограничение рекламного трекинга (рекламный идентификатор)",
+   "menu": "Общие → Система → Дополнительные настройки → Реклама"},
+  {"id": "do-not-sell", "key": "general.doNotSellMyPersonalInformation", "name": "«Не продавать мои данные» (есть не во всех регионах)",
+   "menu": "Общие → Система → Дополнительные настройки → Реклама"},
+  {"id": "content-recommendation", "key": "other.contentRecommendation", "name": "Рекомендации контента на Home",
+   "menu": "Общие → Система → Дополнительные настройки → Настройки Home"},
+  {"id": "screensaver-ad", "key": "general.screenSaverAd", "name": "Промо в заставке",
+   "menu": "Настройки Home или Общие → Заставка"},
+  {"id": "live-promotion", "key": "option.livePromotion", "name": "Промо в эфире / промо-видео webOS",
+   "menu": "Общие → Система → Дополнительные настройки (название зависит от прошивки)"},
+  {"id": "sports-alerts", "key": "general.sportsAlarm", "name": "Спортивные оповещения",
+   "menu": "Общие → Уведомления"}
+ ]
+}
