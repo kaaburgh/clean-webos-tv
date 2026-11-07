@@ -49,7 +49,7 @@ tools/lgtv.py screenshot shots/home.jpg HOME
 | `tools/backup.sh` | снимок ТВ в `backup/<дата>/` до изменений | `lgtv.py` |
 | `tools/restore.sh` | откат настроек из журнала, список ручных изменений и удалённых приложений | `lgtv.py` |
 | `tools/devloop.sh` | build → package → ares-install → ares-launch → ares-inspect | Node/yarn, ares-cli |
-| `tools/inspect.sh` | держит `ares-inspect` в фоне, пишет адрес в `.devtools-endpoint` | ares-cli |
+| `tools/inspect.sh` | держит `ares-inspect` в фоне, пишет адрес в `.devtools-endpoint` этого репозитория | ares-cli |
 | `tools/devtools.py` | DevTools Protocol: eval, run, console, network, dom, screenshot, key, reload | только stdlib |
 
 ## Ограничения, о которых стоит знать

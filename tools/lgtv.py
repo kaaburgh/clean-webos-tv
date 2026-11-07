@@ -245,12 +245,19 @@ async def dispatch(c, args):
     elif cmd == "settings-set":
         wanted = parse_assignments(args.assignments)
         before = await get_settings(c, args.category, list(wanted))
+        unreadable = [k for k in wanted if k not in before]
+        if unreadable:
+            # Without the original value the change could not be undone: refuse the whole batch.
+            print(f"refusing to change {args.category}: the TV did not report the current value of "
+                  f"{', '.join(unreadable)}, so restore could not put it back. Change it through the "
+                  "menu and record it in manual.md instead.", file=sys.stderr)
+            return 2
         if args.log and not args.dry_run:
             os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
             with open(args.log, "a", encoding="utf-8") as f:
                 for k, v in wanted.items():
                     f.write(json.dumps({"ts": int(time.time()), "category": args.category, "key": k,
-                                        "old": before.get(k), "old_known": k in before, "new": v},
+                                        "old": before[k], "new": v},
                                        ensure_ascii=False) + "\n")
         if args.dry_run:
             dump({"before": before, "would_set": wanted})
@@ -278,8 +285,9 @@ async def dispatch(c, args):
                     failed += 1
                     print(f"  NOT RESTORED {category}.{k}: now {after.get(k)!r}, want {v!r}", file=sys.stderr)
         for category, key in unknown:
-            print(f"  original value of {category}.{key} was not recorded; set it by hand", file=sys.stderr)
-        return 1 if failed else 0
+            print(f"  NOT RESTORED {category}.{key}: original value was not recorded; set it by hand", file=sys.stderr)
+        # Anything left changed, known or not, means the rollback is incomplete.
+        return 1 if failed or unknown else 0
     elif cmd == "ssap":
         uri = args.uri[len("ssap://"):] if args.uri.startswith("ssap://") else args.uri
         dump(await c.request(uri, json.loads(args.payload) if args.payload else None))

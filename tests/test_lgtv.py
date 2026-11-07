@@ -48,6 +48,7 @@ class FakeTv:
         self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"}}
         self.buttons = []
         self.alerts = {}
+        self.alert_count = 0
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.http = http.server.HTTPServer(("127.0.0.1", 0), self._image_handler())
@@ -98,7 +99,8 @@ class FakeTv:
             elif uri == "com.webos.applicationManager/listApps":
                 out["apps"] = [{"id": "com.lg.ads", "title": "Ads", "removable": True, "systemApp": False}]
             elif uri == "system.notifications/createAlert":
-                aid = f"a{len(self.alerts)}"
+                self.alert_count += 1
+                aid = f"a{self.alert_count}"
                 self.alerts[aid] = p
                 out["alertId"] = aid
             elif uri == "system.notifications/closeAlert":
@@ -154,12 +156,37 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertEqual(self.tv.settings["general"]["homePromotion"], "off")
             self.assertEqual(json.loads(out)["not_applied"], {})
-            entry = json.loads(open(log).read())
+            with open(log) as f:
+                entry = json.loads(f.read())
             self.assertEqual((entry["old"], entry["new"]), ("on", "off"))
 
             code, _, _ = self.cli("restore", log)
             self.assertEqual(code, 0)
             self.assertEqual(self.tv.settings["general"]["homePromotion"], "on")
+
+    def test_02b_refuses_batch_when_an_original_value_is_unreadable(self):
+        self.cli("pair")
+        alerts_before = self.tv.alert_count
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "changes.jsonl")
+            code, _, err = self.cli("settings-set", "general", "homePromotion=off", "liveplus=off", "--log", log)
+            self.assertEqual(code, 2)
+            self.assertIn("liveplus", err)
+            self.assertFalse(os.path.exists(log))
+        self.assertEqual(self.tv.alert_count, alerts_before, "no luna write may happen")
+        self.assertEqual(self.tv.settings["general"]["homePromotion"], "on")
+
+    def test_02c_restore_with_unknown_original_fails(self):
+        self.cli("pair")
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "changes.jsonl")
+            with open(log, "w") as f:
+                f.write(json.dumps({"category": "general", "key": "homePromotion", "old": "on", "new": "off"}) + "\n")
+                f.write(json.dumps({"category": "option", "key": "liveplus", "old": None,
+                                    "old_known": False, "new": "off"}) + "\n")
+            code, _, err = self.cli("restore", log)
+        self.assertEqual(code, 1)
+        self.assertIn("NOT RESTORED option.liveplus", err)
 
     def test_03_settings_set_requires_log(self):
         with self.assertRaises(SystemExit):
@@ -171,7 +198,8 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             path = os.path.join(d, "s.jpg")
             code, _, _ = self.cli("screenshot", path, "home", "down", "--delay", "0", "--settle", "0")
             self.assertEqual(code, 0)
-            self.assertEqual(open(path, "rb").read(), b"\xff\xd8JPEG")
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"\xff\xd8JPEG")
         self.assertEqual(self.tv.buttons[-2:], ["HOME", "DOWN"])
 
 

@@ -18,6 +18,8 @@ import devtools  # noqa: E402
 import wsmini  # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\nfake"
+TOKEN = "s3cr3tT0kenABCDEFGHIJKLMNOPQRSTUV"
+SIGNED_URL = f"https://user:pw@cdn.example.com/hls/{TOKEN}/720p/seg-12.ts?st=abc123&e=1799999999#frag"
 
 
 class FakeDevTools:
@@ -83,6 +85,12 @@ class FakeDevTools:
                     send({"id": i, "result": {}})
                     send({"method": "Runtime.exceptionThrown",
                           "params": {"exceptionDetails": {"exception": {"description": "TypeError: x"}}}})
+                elif m == "Network.enable":
+                    send({"id": i, "result": {}})
+                    send({"method": "Network.requestWillBeSent", "params": {"requestId": "1", "request": {
+                        "method": "GET", "url": SIGNED_URL}}})
+                    send({"method": "Network.responseReceived", "params": {"requestId": "1", "response": {
+                        "status": 200, "mimeType": "video/mp2t", "url": SIGNED_URL}}})
                 else:
                     send({"id": i, "result": {}})
         except (wsmini.WebSocketError, OSError):
@@ -146,6 +154,23 @@ class DevtoolsTest(unittest.TestCase):
         exprs = [c["params"]["expression"] for c in self.server.calls[before:] if c["method"] == "Runtime.evaluate"]
         self.assertEqual(len(exprs), 2)
         self.assertIn("(13, \"Enter\", \"keydown\")", exprs[0])
+
+    def test_network_redacts_tokens_by_default(self):
+        code, out = self.run_cli("network", "--seconds", "0.5")
+        self.assertEqual(code, 0)
+        self.assertIn("cdn.example.com/hls/<redacted>/720p/seg-12.ts?st=<redacted>&e=<redacted>", out)
+        for secret in (TOKEN, "abc123", "1799999999", "user:pw", "#frag"):
+            self.assertNotIn(secret, out)
+
+    def test_network_raw_urls_opt_in(self):
+        _, out = self.run_cli("network", "--seconds", "0.5", "--raw-urls")
+        self.assertIn(TOKEN, out)
+
+    def test_redact_text_inside_console_messages(self):
+        line = devtools.redact_text(f"hls error loading {SIGNED_URL} (network)")
+        self.assertNotIn(TOKEN, line)
+        self.assertTrue(line.endswith("(network)"))
+        self.assertEqual(devtools.redact_url("http://10.0.0.2:8080/a/b.m3u8"), "http://10.0.0.2:8080/a/b.m3u8")
 
     def test_unknown_key(self):
         with self.assertRaises(SystemExit):

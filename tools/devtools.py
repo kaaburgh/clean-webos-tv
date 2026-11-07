@@ -2,13 +2,14 @@
 """Drive a webOS web app through Chrome DevTools Protocol (the endpoint ares-inspect opens).
 
 Standard library only. The endpoint is taken from --endpoint, then $DEVTOOLS_URL, then the
-.devtools-endpoint file that tools/inspect.sh writes.
+.devtools-endpoint file that tools/inspect.sh writes in the root of this repository.
 
   devtools.py targets                          list inspectable pages
   devtools.py eval 'document.title'            evaluate JS, print JSON result
   devtools.py run snippet.js                   evaluate a JS file
   devtools.py console --seconds 30             stream console, exceptions and log entries
-  devtools.py network --seconds 30 --grep m3u8 stream network requests
+  devtools.py network --seconds 30 --grep m3u8 stream network requests (URL tokens redacted;
+                                               --raw-urls to keep them)
   devtools.py dom '#root' --text               outerHTML (or innerText) of a selector
   devtools.py screenshot shots/01.png          capture the app's web layer (video is black)
   devtools.py key Down Down Enter --delay 0.4  dispatch remote keys (Back=461, Blue=406, ...)
@@ -21,7 +22,9 @@ import json
 import os
 import sys
 import time
+import re
 import urllib.request
+from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wsmini import WebSocket  # noqa: E402
@@ -49,15 +52,46 @@ def key_code(name):
     raise SystemExit(f"unknown key {name!r}; known: {', '.join(KEYS)} or a numeric keyCode")
 
 
+# inspect.sh keeps its runtime files in this repository (git-ignored), never in the app's worktree.
+ENDPOINT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".devtools-endpoint")
+
+URL_RE = re.compile(r"\b(?:https?|wss?)://[^\s\"'<>)]+")
+# Path segments that look like tokens/signatures: long runs of base64/hex-ish characters.
+SECRET_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_=~.+-]{24,}$")
+
+
+def redact_url(url):
+    """Drop userinfo, query values, fragment and token-like path segments from one URL."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<url>"
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    segments = []
+    for seg in parts.path.split("/"):
+        stem = seg.rsplit(".", 1)[0] if "." in seg[-6:] else seg
+        segments.append("<redacted>" if SECRET_SEGMENT_RE.match(stem) else seg)
+    out = f"{parts.scheme}://{host}{'/'.join(segments)}"
+    if parts.query:
+        names = [pair.split("=", 1)[0] for pair in parts.query.split("&") if pair]
+        out += "?" + "&".join(f"{n}=<redacted>" for n in names)
+    return out
+
+
+def redact_text(text):
+    return URL_RE.sub(lambda m: redact_url(m.group(0)), text)
+
+
 def find_endpoint(arg):
     if arg:
         return arg.rstrip("/")
     if os.environ.get("DEVTOOLS_URL"):
         return os.environ["DEVTOOLS_URL"].rstrip("/")
-    for path in (".devtools-endpoint", os.path.join(os.path.dirname(__file__), "..", ".devtools-endpoint")):
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                return f.read().strip().rstrip("/")
+    if os.path.exists(ENDPOINT_FILE):
+        with open(ENDPOINT_FILE, encoding="utf-8") as f:
+            return f.read().strip().rstrip("/")
     raise SystemExit("no DevTools endpoint: run tools/inspect.sh, or pass --endpoint http://host:port")
 
 
@@ -144,13 +178,16 @@ def fmt_remote_object(obj):
     return obj.get("description") or obj.get("type", "")
 
 
-def stream(cdp, seconds, grep, formatter):
+def stream(cdp, seconds, grep, formatter, raw_urls=False):
     deadline = time.time() + seconds
     while time.time() < deadline:
         msg = cdp.next_event(max(0.1, deadline - time.time()))
         if not msg:
             continue
         line = formatter(msg)
+        if line and not raw_urls:
+            # Signed CDN links in playlists/segments are bearer credentials; keep them out of transcripts.
+            line = redact_text(line)
         if line and (not grep or grep.lower() in line.lower()):
             print(line, flush=True)
 
@@ -230,6 +267,8 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument("--seconds", type=float, default=20)
         p.add_argument("--grep")
+        p.add_argument("--raw-urls", action="store_true",
+                       help="print URLs verbatim, tokens included (default: query values and token-like path parts redacted)")
     p = sub.add_parser("dom"); p.add_argument("selector", nargs="?", default="body")
     p.add_argument("--text", action="store_true", help="innerText instead of outerHTML")
     p = sub.add_parser("screenshot"); p.add_argument("path")
@@ -259,10 +298,10 @@ def main(argv=None):
                 cdp.call("Log.enable")
             except SystemExit:
                 pass
-            stream(cdp, args.seconds, args.grep, console_line)
+            stream(cdp, args.seconds, args.grep, console_line, args.raw_urls)
         elif args.cmd == "network":
             cdp.call("Network.enable")
-            stream(cdp, args.seconds, args.grep, network_line)
+            stream(cdp, args.seconds, args.grep, network_line, args.raw_urls)
         elif args.cmd == "dom":
             prop = "innerText" if args.text else "outerHTML"
             expr = f"(function(){{var e=document.querySelector({json.dumps(args.selector)});return e?e.{prop}:null}})()"

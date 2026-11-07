@@ -19,7 +19,7 @@ Apps. Новые прошивки слушают только `wss://TV:3001` (�
 Developer Mode, проверьте Dev Mode Status и Remain Session). После повторного включения может
 понадобиться заново `ares-novacom --device lg-g5 --getkey` при включённом Key Server.
 
-**`inspect.sh` не находит адрес DevTools.** Посмотрите `.ares-inspect.log`. Проверьте, что
+**`inspect.sh` не находит адрес DevTools.** Посмотрите `.ares-inspect.log` в корне clean-webos-tv. Проверьте, что
 приложение установлено и запущено (`ares-launch --running --device lg-g5`). Если локальный
 `@webosose/ares-cli` не работает с ТВ, поставьте `@webos-tools/cli` глобально и запустите с
 `ARES_GLOBAL=1`.
