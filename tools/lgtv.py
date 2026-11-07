@@ -25,12 +25,17 @@ The first command shows a pairing prompt on the TV; the key is kept in
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import sys
 import time
+import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 CONFIG_DIR = os.environ.get("CLEAN_WEBOS_TV_HOME") or os.path.join(os.path.expanduser("~"), ".config", "clean-webos-tv")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
@@ -199,13 +204,88 @@ async def get_settings(c, category, keys, report_skipped=True):
     return await SettingsReader(c, category, report_skipped).read(keys)
 
 
-async def take_screenshot(c, path):
+class _NoScreenshotRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not follow the TV's screenshot URL to an untrusted host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _matches_tv_host(uri_host, expected_host):
+    """Accept the configured TV name or its resolved IP, never a foreign DNS name."""
+    uri_host = (uri_host or "").lower().rstrip(".")
+    expected_host = expected_host.lower().rstrip(".")
+    if uri_host == expected_host:
+        return True
+
+    # Only resolve the explicitly configured TV hostname, not an arbitrary hostname
+    # supplied by the remote imageUri (avoids DNS lookups for untrusted URLs).
+    try:
+        uri_ip = ipaddress.ip_address(uri_host)
+    except ValueError:
+        return False
+    try:
+        return uri_ip == ipaddress.ip_address(expected_host)
+    except ValueError:
+        pass
+    try:
+        addresses = socket.getaddrinfo(expected_host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for address in addresses:
+        try:
+            if ipaddress.ip_address(address[4][0]) == uri_ip:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def download_screenshot(uri, expected_host):
+    """Download only from the paired TV host; accept its local HTTPS certificate.
+
+    webOS may return a self-signed HTTPS imageUri for tv/executeOneShot. Disabling
+    verification is confined to this one request, and HTTP redirects are forbidden.
+    """
+    try:
+        parsed = urlsplit(uri)
+        # Reading parsed.port also rejects malformed/non-numeric explicit ports.
+        port = parsed.port
+        valid_url = (parsed.scheme in ("http", "https") and
+                     (port is None or port > 0) and
+                     parsed.username is None and parsed.password is None and
+                     _matches_tv_host(parsed.hostname, expected_host))
+    except ValueError:
+        raise SystemExit("refusing malformed TV screenshot URL") from None
+    if not valid_url:
+        raise SystemExit("refusing screenshot URL: expected HTTP(S) on the paired TV host")
+
+    # A screenshot is a LAN request; never honor proxy settings from the environment.
+    handlers = [urllib.request.ProxyHandler({}), _NoScreenshotRedirect()]
+    if parsed.scheme == "https":
+        context = ssl.create_default_context()
+        # The TV uses a locally issued certificate: scope the exception to its image URL.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    opener = urllib.request.build_opener(*handlers)
+    try:
+        with opener.open(uri, timeout=20) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise SystemExit(f"refusing screenshot redirect (HTTP {exc.code})") from None
+        raise SystemExit(f"screenshot download failed: HTTP {exc.code}") from None
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+        raise SystemExit(f"screenshot download failed: {exc}") from None
+
+
+async def take_screenshot(c, path, expected_host):
     res = await c.request("tv/executeOneShot")
     uri = res.get("imageUri")
     if not uri:
         raise SystemExit(f"TV returned no imageUri: {res}")
-    with urllib.request.urlopen(uri, timeout=20) as r:
-        data = r.read()
+    data = download_screenshot(uri, expected_host)
     if not data:
         print("empty screenshot (protected content or Live TV?)", file=sys.stderr)
         return 1
@@ -248,12 +328,12 @@ async def run(args):
         raise SystemExit("set TV_HOST or pass --host <tv ip>")
     c = await client(host, pair_ok=args.cmd == "pair")
     try:
-        return await dispatch(c, args)
+        return await dispatch(c, args, host)
     finally:
         await c.disconnect()
 
 
-async def dispatch(c, args):
+async def dispatch(c, args, host):
     cmd = args.cmd
     if cmd == "pair":
         print("paired; key saved to", KEY_FILE)
@@ -293,7 +373,7 @@ async def dispatch(c, args):
         if args.keys:
             await press(c, args.keys, args.delay)
             await asyncio.sleep(args.settle)
-        return await take_screenshot(c, args.path)
+        return await take_screenshot(c, args.path, host)
     elif cmd == "settings-get":
         values = await get_settings(c, args.category, args.keys)
         dump(values)
