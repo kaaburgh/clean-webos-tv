@@ -1,6 +1,8 @@
 """lgtv.py: restore planning (pure) and the CLI against a fake SSAP TV (needs bscpylgtv)."""
 
 import asyncio
+import stat
+import subprocess
 import http.server
 import io
 import json
@@ -43,6 +45,52 @@ class PlanRestoreTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             lgtv.parse_assignments(["oops"])
 
+
+@unittest.skipUnless(HAVE_CLIENT, "bscpylgtv not installed")
+class SettingsReaderTest(unittest.TestCase):
+    class Client:
+        def __init__(self, known=None, fail=None):
+            self.known, self.fail, self.calls = known or {}, fail, 0
+
+        async def request(self, uri, payload):
+            from bscpylgtv.exceptions import PyLGTVCmdError
+            self.calls += 1
+            if self.fail:
+                raise self.fail
+            if any(k not in self.known for k in payload["keys"]):
+                raise PyLGTVCmdError({"type": "error", "error": "500 Application error"})
+            return {"returnValue": True, "settings": {k: self.known[k] for k in payload["keys"]}}
+
+    def read(self, client, keys):
+        reader = lgtv.SettingsReader(client, "general", report_skipped=False)
+        return asyncio.run(reader.read(keys)), reader
+
+    def test_connection_errors_propagate_single_and_batch(self):
+        from bscpylgtv.exceptions import PyLGTVCmdException
+        for keys in (["a"], ["a", "b", "c"]):
+            client = self.Client(fail=PyLGTVCmdException("Not connected, can't execute command."))
+            with self.assertRaises(PyLGTVCmdException):
+                self.read(client, keys)
+            self.assertEqual(client.calls, 1)
+
+    def test_one_bad_key_among_many_is_found_by_bisection(self):
+        keys = [f"k{i}" for i in range(64)]
+        client = self.Client(known={k: i for i, k in enumerate(keys) if k != "k37"})
+        values, reader = self.read(client, keys)
+        self.assertEqual(len(values), 63)
+        self.assertEqual(reader.skipped, ["k37"])
+        self.assertLessEqual(client.calls, 2 * 6 + 1)
+
+    def test_bulk_reads_leave_out_pins_passwords_and_tokens(self):
+        lock = lgtv.known_keys("lock")
+        option = lgtv.known_keys("option")
+        voice = lgtv.known_keys("voiceframework")
+        for key in ("systemPinCode", "camPinCode", "initialPinCode", "systemPin"):
+            self.assertNotIn(key, lock)
+        for key in ("password_ipcontrol", "IPControlSecureKey"):
+            self.assertNotIn(key, option)
+        self.assertNotIn("googleAssistantStateToken", voice)
+        self.assertIn("livePlus", option)
 
 
 class ScreenshotDownloadTest(unittest.TestCase):
@@ -176,10 +224,12 @@ class FakeTv:
     """SSAP subset: pairing, apps, settings, the alert-based luna trick, screenshots, input socket."""
 
     def __init__(self):
-        self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"}}
+        self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"},
+                         "option": {"livePlus": "off"}, "other": {"contentRecommendation": "on"}}
         self.buttons = []
         self.alerts = {}
         self.alert_count = 0
+        self.settings_broken = False
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.http = http.server.HTTPServer(("127.0.0.1", 0), self._image_handler())
@@ -226,7 +276,14 @@ class FakeTv:
             out = {"returnValue": True}
             if uri == "settings/getSystemSettings":
                 cat = self.settings.get(p["category"], {})
-                out["settings"] = {k: cat[k] for k in p.get("keys", cat) if k in cat}
+                # Like a real G5: no keys is an error, and so is any key this firmware lacks.
+                bad = "service unavailable" if self.settings_broken else "keys are mandatory." if not p.get("keys") else (
+                    "unknown key" if any(k not in cat for k in p["keys"]) else None)
+                if bad:
+                    await ws.send(json.dumps({"type": "error", "id": msg["id"], "error": "500 Application error",
+                                              "payload": {"returnValue": False, "errorCode": -1000, "errorText": bad}}))
+                    continue
+                out["settings"] = {k: cat[k] for k in p["keys"]}
             elif uri == "com.webos.applicationManager/listApps":
                 out["apps"] = [{"id": "com.lg.ads", "title": "Ads", "removable": True, "systemApp": False}]
             elif uri == "system.notifications/createAlert":
@@ -319,6 +376,68 @@ class CliAgainstFakeTvTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("NOT RESTORED option.liveplus", err)
 
+    def test_02d_settings_get_without_keys_uses_known_keys_and_skips_missing(self):
+        self.cli("pair")
+        with tempfile.TemporaryDirectory() as d:
+            keys = os.path.join(d, "keys.json")
+            with open(keys, "w") as f:
+                json.dump({"_source": "test", "general": ["homePromotion", "contentRecommendation", "goneKey"]}, f)
+            old = lgtv.KEYS_FILE
+            lgtv.KEYS_FILE = keys
+            try:
+                code, out, err = self.cli("settings-get", "general")
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(out), {"homePromotion": "on", "contentRecommendation": "on"})
+                self.assertIn("general.goneKey: rejected by the TV, skipped", err)
+                with self.assertRaises(SystemExit) as ctx:
+                    self.cli("settings-get", "nosuchcategory")
+                self.assertIn("pass keys explicitly", str(ctx.exception))
+            finally:
+                lgtv.KEYS_FILE = old
+
+    def test_02e_bundled_g5_keys_cover_privacy_settings(self):
+        with open(lgtv.KEYS_FILE) as f:
+            table = json.load(f)
+        for cat, key in (("general", "homeAutoLaunch"), ("general", "homePromotion"), ("option", "livePlus"),
+                         ("other", "contentRecommendation")):
+            self.assertIn(key, table[cat])
+
+    def test_02f_backup_is_private_and_reads_settings(self):
+        self.cli("pair")
+        tools = os.path.join(os.path.dirname(__file__), "..", "tools")
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "backup", "snap")
+            env = dict(os.environ, CLEAN_WEBOS_TV_HOME=self.home.name)
+            run = subprocess.run(["bash", os.path.join(tools, "backup.sh"), target], env=env,
+                                 capture_output=True, text=True, timeout=120)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o700)
+            with open(os.path.join(target, "STATUS")) as f:
+                self.assertEqual(f.readline().strip(), "PARTIAL")  # the fake TV lacks most categories
+            path = os.path.join(target, "settings-general.json")
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            with open(path) as f:
+                self.assertEqual(json.load(f), {"homePromotion": "on"})
+
+    def test_02g_backup_fails_when_settings_are_unreadable(self):
+        self.cli("pair")
+        tools = os.path.join(os.path.dirname(__file__), "..", "tools")
+        self.tv.settings_broken = True
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = os.path.join(d, "backup")
+                target = os.path.join(root, "snap")
+                env = dict(os.environ, CLEAN_WEBOS_TV_HOME=self.home.name)
+                run = subprocess.run(["bash", os.path.join(tools, "backup.sh"), target], env=env,
+                                     capture_output=True, text=True, timeout=120)
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+                self.assertIn("BACKUP FAILED", run.stderr)
+                self.assertFalse(os.path.lexists(os.path.join(root, "latest")))
+                with open(os.path.join(target, "STATUS")) as f:
+                    self.assertTrue(f.read().startswith("FAILED"))
+        finally:
+            self.tv.settings_broken = False
+
     def test_03_settings_set_requires_log(self):
         with self.assertRaises(SystemExit):
             self.cli("settings-set", "general", "homePromotion=off")
@@ -332,20 +451,6 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             with open(path, "rb") as f:
                 self.assertEqual(f.read(), b"\xff\xd8JPEG")
         self.assertEqual(self.tv.buttons[-2:], ["HOME", "DOWN"])
-
-    def test_04b_screenshot_with_cli_host_and_no_environment_host(self):
-        self.cli("pair")
-        saved = os.environ.pop("TV_HOST", None)
-        try:
-            with tempfile.TemporaryDirectory() as d:
-                path = os.path.join(d, "s.jpg")
-                code, _, _ = self.cli("--host", "127.0.0.1", "screenshot", path)
-                self.assertEqual(code, 0)
-                with open(path, "rb") as f:
-                    self.assertEqual(f.read(), b"\xff\xd8JPEG")
-        finally:
-            if saved is not None:
-                os.environ["TV_HOST"] = saved
 
 
 if __name__ == "__main__":

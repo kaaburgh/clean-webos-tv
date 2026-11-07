@@ -21,6 +21,32 @@
 AirPlay/Chromecast, Screen Share. Никогда не отзывать основное пользовательское соглашение (Terms of
 Use): без него не работают LG Content Store и большинство приложений.
 
+## Ключи настроек на G5
+
+Сервис настроек читает только явно названные ключи. Полный список ключей G5 (webOS 10.2) лежит в
+`tools/settings-keys/G5.json`, он взят из документации `bscpylgtv`, которую собрали из
+декомпилированной прошивки. Ниже ключи, которые относятся к таблице выше, и значения из примера
+в этой документации. Это снимок одного телевизора, а не заводские значения. Верить можно только
+значению, прочитанному с вашего ТВ через `settings-get`.
+
+| Ключ | Значение в примере bscpylgtv (не заводское) | Что это, по названию |
+|---|---|---|
+| `option.livePlus` | `"off"` | Live Plus (ACR) |
+| `option.watchedListCollection` | `"on"` | сбор истории просмотра |
+| `option.livePromotion`, `option.webOSPromotionVideo` | `"on"` | промо в эфире и промо-видео |
+| `general.homeAutoLaunch` | `"on"` | автозапуск Home |
+| `general.homePromotion` | `"on"` | промо на Home |
+| `other.contentRecommendation` | `"on"` | рекомендации контента |
+| `general.personalRecommend` | `{"changedByUser": false, "value": "off"}` | персональные рекомендации |
+| `general.screenSaverAd` | `"on"` | реклама в заставке |
+| `general.adCookie` | `"on"` | рекламный идентификатор |
+| `general.doNotSellMyPersonalInformation` | `"off"` | «Не продавать мои данные» |
+| `general.sportsAlarm` | `"on"` | спортивные оповещения |
+| `support.automaticUpdate` | `"off"` | автообновление (только с согласия владельца) |
+
+Назначение ключа выведено из его названия, LG его не документирует. Поэтому после каждой записи
+агент проверяет результат скриншотом соответствующего пункта меню.
+
 ## Приложения
 
 `tools/lgtv.py apps --all` показывает `removable`. Удаляются только такие, и только те, которые

@@ -14,7 +14,7 @@ The first command shows a pairing prompt on the TV; the key is kept in
   lgtv.py close <appId>                     close an app
   lgtv.py button HOME DOWN ENTER            press remote buttons (names: lgtv.py buttons)
   lgtv.py screenshot shots/01.jpg [KEYS..]  press keys, then capture the whole screen
-  lgtv.py settings-get <category> [keys..]  read system settings
+  lgtv.py settings-get <category> [keys..]  read settings (no keys: all known keys, tools/settings-keys/)
   lgtv.py settings-set <category> k=v ..    change settings, logged for restore (--log)
   lgtv.py restore <changes.jsonl>           undo every logged settings change
   lgtv.py ssap <uri> [JSON]                 raw SSAP request (prints the response)
@@ -28,6 +28,7 @@ import asyncio
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -142,12 +143,65 @@ async def client(host, pair_ok=True):
     return c
 
 
-async def get_settings(c, category, keys):
-    payload = {"category": category}
-    if keys:
-        payload["keys"] = list(keys)
-    res = await c.request("settings/getSystemSettings", payload)
-    return res.get("settings", {})
+KEYS_FILE = os.environ.get("TV_SETTINGS_KEYS") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "settings-keys", "G5.json")
+
+
+# Keys that hold PINs, passwords or tokens. Bulk reads (no explicit keys) leave them out so that a
+# backup never copies credentials to disk; naming such a key explicitly still reads it.
+SENSITIVE_KEY_RE = re.compile(r"(?i)token|passw|pin(code)?$|pincode|securekey|networkkey|credential|^newKey$")
+
+
+def known_keys(category):
+    """Non-sensitive keys the firmware is known to have in a category (the TV refuses a read without `keys`)."""
+    try:
+        with open(KEYS_FILE, encoding="utf-8") as f:
+            table = json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"no keys given and no key list at {KEYS_FILE}; pass keys or set TV_SETTINGS_KEYS")
+    if category not in table or category.startswith("_"):
+        cats = ", ".join(k for k in table if not k.startswith("_"))
+        raise SystemExit(f"category {category!r} is not in {KEYS_FILE}; pass keys explicitly. Known: {cats}")
+    return [k for k in table[category] if not SENSITIVE_KEY_RE.search(k)]
+
+
+class SettingsReader:
+    """Reads settings, isolating keys the TV rejects by splitting a rejected batch in halves.
+
+    Only an error answer from the TV (PyLGTVCmdError) counts as a rejected key. A lost connection,
+    an invalid response or a missing service propagates, so a backup never turns a failure into
+    an empty but "successful" category. One bad key among N costs about 2*log2(N) requests.
+    """
+
+    def __init__(self, c, category, report_skipped=True):
+        self.c, self.category, self.report_skipped = c, category, report_skipped
+        self.requests = 0
+        self.skipped = []
+
+    async def read(self, keys):
+        from bscpylgtv.exceptions import PyLGTVCmdError, PyLGTVServiceNotFoundError
+        self.requests += 1
+        try:
+            res = await self.c.request("settings/getSystemSettings", {"category": self.category, "keys": keys})
+            return res.get("settings", {})
+        except PyLGTVServiceNotFoundError:
+            raise
+        except PyLGTVCmdError as e:
+            if len(keys) == 1:
+                self.skipped.append(keys[0])
+                if self.report_skipped:
+                    print(f"  {self.category}.{keys[0]}: rejected by the TV, skipped ({e})", file=sys.stderr)
+                return {}
+        mid = len(keys) // 2
+        out = await self.read(keys[:mid])
+        out.update(await self.read(keys[mid:]))
+        return out
+
+
+async def get_settings(c, category, keys, report_skipped=True):
+    """Read settings; with no keys, read every known non-sensitive key of the category."""
+    keys = list(keys) if keys else known_keys(category)
+    return await SettingsReader(c, category, report_skipped).read(keys)
 
 
 class _NoScreenshotRedirect(urllib.request.HTTPRedirectHandler):
@@ -321,7 +375,11 @@ async def dispatch(c, args, host):
             await asyncio.sleep(args.settle)
         return await take_screenshot(c, args.path, host)
     elif cmd == "settings-get":
-        dump(await get_settings(c, args.category, args.keys))
+        values = await get_settings(c, args.category, args.keys)
+        dump(values)
+        if not values:
+            print(f"no setting of {args.category} could be read", file=sys.stderr)
+            return 1
     elif cmd == "settings-set":
         wanted = parse_assignments(args.assignments)
         before = await get_settings(c, args.category, list(wanted))
