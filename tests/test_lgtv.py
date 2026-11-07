@@ -1,6 +1,8 @@
 """lgtv.py: restore planning (pure) and the CLI against a fake SSAP TV (needs bscpylgtv)."""
 
 import asyncio
+import stat
+import subprocess
 import http.server
 import io
 import json
@@ -39,6 +41,53 @@ class PlanRestoreTest(unittest.TestCase):
                          {"a": "on", "b": 3, "c": True, "d": {"x": 1}})
         with self.assertRaises(SystemExit):
             lgtv.parse_assignments(["oops"])
+
+
+@unittest.skipUnless(HAVE_CLIENT, "bscpylgtv not installed")
+class SettingsReaderTest(unittest.TestCase):
+    class Client:
+        def __init__(self, known=None, fail=None):
+            self.known, self.fail, self.calls = known or {}, fail, 0
+
+        async def request(self, uri, payload):
+            from bscpylgtv.exceptions import PyLGTVCmdError
+            self.calls += 1
+            if self.fail:
+                raise self.fail
+            if any(k not in self.known for k in payload["keys"]):
+                raise PyLGTVCmdError({"type": "error", "error": "500 Application error"})
+            return {"returnValue": True, "settings": {k: self.known[k] for k in payload["keys"]}}
+
+    def read(self, client, keys):
+        reader = lgtv.SettingsReader(client, "general", report_skipped=False)
+        return asyncio.run(reader.read(keys)), reader
+
+    def test_connection_errors_propagate_single_and_batch(self):
+        from bscpylgtv.exceptions import PyLGTVCmdException
+        for keys in (["a"], ["a", "b", "c"]):
+            client = self.Client(fail=PyLGTVCmdException("Not connected, can't execute command."))
+            with self.assertRaises(PyLGTVCmdException):
+                self.read(client, keys)
+            self.assertEqual(client.calls, 1)
+
+    def test_one_bad_key_among_many_is_found_by_bisection(self):
+        keys = [f"k{i}" for i in range(64)]
+        client = self.Client(known={k: i for i, k in enumerate(keys) if k != "k37"})
+        values, reader = self.read(client, keys)
+        self.assertEqual(len(values), 63)
+        self.assertEqual(reader.skipped, ["k37"])
+        self.assertLessEqual(client.calls, 2 * 6 + 1)
+
+    def test_bulk_reads_leave_out_pins_passwords_and_tokens(self):
+        lock = lgtv.known_keys("lock")
+        option = lgtv.known_keys("option")
+        voice = lgtv.known_keys("voiceframework")
+        for key in ("systemPinCode", "camPinCode", "initialPinCode", "systemPin"):
+            self.assertNotIn(key, lock)
+        for key in ("password_ipcontrol", "IPControlSecureKey"):
+            self.assertNotIn(key, option)
+        self.assertNotIn("googleAssistantStateToken", voice)
+        self.assertIn("livePlus", option)
 
 
 class FakeTv:
@@ -207,7 +256,7 @@ class CliAgainstFakeTvTest(unittest.TestCase):
                 code, out, err = self.cli("settings-get", "general")
                 self.assertEqual(code, 0)
                 self.assertEqual(json.loads(out), {"homePromotion": "on", "contentRecommendation": "on"})
-                self.assertIn("general.goneKey: not readable", err)
+                self.assertIn("general.goneKey: rejected by the TV, skipped", err)
                 with self.assertRaises(SystemExit) as ctx:
                     self.cli("settings-get", "nosuchcategory")
                 self.assertIn("pass keys explicitly", str(ctx.exception))
@@ -220,6 +269,21 @@ class CliAgainstFakeTvTest(unittest.TestCase):
         for cat, key in (("general", "homeAutoLaunch"), ("general", "homePromotion"), ("option", "livePlus"),
                          ("other", "contentRecommendation")):
             self.assertIn(key, table[cat])
+
+    def test_02f_backup_is_private_and_reads_settings(self):
+        self.cli("pair")
+        tools = os.path.join(os.path.dirname(__file__), "..", "tools")
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "backup", "snap")
+            env = dict(os.environ, CLEAN_WEBOS_TV_HOME=self.home.name)
+            run = subprocess.run(["bash", os.path.join(tools, "backup.sh"), target], env=env,
+                                 capture_output=True, text=True, timeout=120)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o700)
+            path = os.path.join(target, "settings-general.json")
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            with open(path) as f:
+                self.assertEqual(json.load(f), {"homePromotion": "on"})
 
     def test_03_settings_set_requires_log(self):
         with self.assertRaises(SystemExit):

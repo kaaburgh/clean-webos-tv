@@ -7,7 +7,10 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 : "${TV_HOST:?set TV_HOST to the TV IP}"
 dir="${1:-backup/$(date +%Y%m%d-%H%M%S)}"
+# The backup describes the owner's TV and accounts: keep it private to this user.
+umask 077
 mkdir -p "$dir"
+chmod 700 "$dir"
 lgtv() { python3 "$here/lgtv.py" --host "$TV_HOST" "$@"; }
 
 lgtv info >"$dir/info.json"
@@ -15,8 +18,9 @@ lgtv apps >"$dir/launch-points.json"
 lgtv apps --all >"$dir/apps-all.json"
 
 # The settings service refuses reads without explicit keys, so lgtv.py asks for every key known
-# for the category (tools/settings-keys/G5.json, override with TV_SETTINGS_KEYS). Keys this
-# firmware lacks are skipped and listed in the .err file; a failed category does not stop the backup.
+# for the category (tools/settings-keys/G5.json, override with TV_SETTINGS_KEYS), except PINs,
+# passwords and tokens. Keys the TV rejects are skipped and listed in the .err file. A category
+# that cannot be read at all (or a lost connection) is reported and does not stop the backup.
 for category in general option other picture sound network time lock caption channel aiPicture \
                 aspectRatio push support voiceframework timer; do
   if lgtv settings-get "$category" >"$dir/settings-$category.json" 2>"$dir/settings-$category.err"; then

@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -141,8 +142,13 @@ KEYS_FILE = os.environ.get("TV_SETTINGS_KEYS") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "settings-keys", "G5.json")
 
 
+# Keys that hold PINs, passwords or tokens. Bulk reads (no explicit keys) leave them out so that a
+# backup never copies credentials to disk; naming such a key explicitly still reads it.
+SENSITIVE_KEY_RE = re.compile(r"(?i)token|passw|pin(code)?$|pincode|securekey|networkkey|credential|^newKey$")
+
+
 def known_keys(category):
-    """Keys the firmware is known to have in a category: the TV refuses a read without `keys`."""
+    """Non-sensitive keys the firmware is known to have in a category (the TV refuses a read without `keys`)."""
     try:
         with open(KEYS_FILE, encoding="utf-8") as f:
             table = json.load(f)
@@ -151,29 +157,46 @@ def known_keys(category):
     if category not in table or category.startswith("_"):
         cats = ", ".join(k for k in table if not k.startswith("_"))
         raise SystemExit(f"category {category!r} is not in {KEYS_FILE}; pass keys explicitly. Known: {cats}")
-    return table[category]
+    return [k for k in table[category] if not SENSITIVE_KEY_RE.search(k)]
+
+
+class SettingsReader:
+    """Reads settings, isolating keys the TV rejects by splitting a rejected batch in halves.
+
+    Only an error answer from the TV (PyLGTVCmdError) counts as a rejected key. A lost connection,
+    an invalid response or a missing service propagates, so a backup never turns a failure into
+    an empty but "successful" category. One bad key among N costs about 2*log2(N) requests.
+    """
+
+    def __init__(self, c, category, report_skipped=True):
+        self.c, self.category, self.report_skipped = c, category, report_skipped
+        self.requests = 0
+        self.skipped = []
+
+    async def read(self, keys):
+        from bscpylgtv.exceptions import PyLGTVCmdError, PyLGTVServiceNotFoundError
+        self.requests += 1
+        try:
+            res = await self.c.request("settings/getSystemSettings", {"category": self.category, "keys": keys})
+            return res.get("settings", {})
+        except PyLGTVServiceNotFoundError:
+            raise
+        except PyLGTVCmdError as e:
+            if len(keys) == 1:
+                self.skipped.append(keys[0])
+                if self.report_skipped:
+                    print(f"  {self.category}.{keys[0]}: rejected by the TV, skipped ({e})", file=sys.stderr)
+                return {}
+        mid = len(keys) // 2
+        out = await self.read(keys[:mid])
+        out.update(await self.read(keys[mid:]))
+        return out
 
 
 async def get_settings(c, category, keys, report_skipped=True):
-    """Read settings; with no keys, read every key known for the category.
-
-    A batch that the TV rejects (some key unknown to this firmware) is retried key by key, and the
-    keys it still rejects are skipped, so one stale key never hides the rest.
-    """
-    from bscpylgtv.exceptions import PyLGTVCmdError, PyLGTVCmdException
+    """Read settings; with no keys, read every known non-sensitive key of the category."""
     keys = list(keys) if keys else known_keys(category)
-    try:
-        res = await c.request("settings/getSystemSettings", {"category": category, "keys": keys})
-        return res.get("settings", {})
-    except (PyLGTVCmdError, PyLGTVCmdException):  # the TV answered with an error, not a lost connection
-        if len(keys) == 1:
-            if report_skipped:
-                print(f"  {category}.{keys[0]}: not readable on this TV, skipped", file=sys.stderr)
-            return {}
-    out = {}
-    for key in keys:
-        out.update(await get_settings(c, category, [key], report_skipped))
-    return out
+    return await SettingsReader(c, category, report_skipped).read(keys)
 
 
 async def take_screenshot(c, path):
@@ -272,7 +295,11 @@ async def dispatch(c, args):
             await asyncio.sleep(args.settle)
         return await take_screenshot(c, args.path)
     elif cmd == "settings-get":
-        dump(await get_settings(c, args.category, args.keys))
+        values = await get_settings(c, args.category, args.keys)
+        dump(values)
+        if not values:
+            print(f"no setting of {args.category} could be read", file=sys.stderr)
+            return 1
     elif cmd == "settings-set":
         wanted = parse_assignments(args.assignments)
         before = await get_settings(c, args.category, list(wanted))
