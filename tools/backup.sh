@@ -19,15 +19,27 @@ lgtv apps --all >"$dir/apps-all.json"
 
 # The settings service refuses reads without explicit keys, so lgtv.py asks for every key known
 # for the category (tools/settings-keys/G5.json, override with TV_SETTINGS_KEYS), except PINs,
-# passwords and tokens. Keys the TV rejects are skipped and listed in the .err file. A category
-# that cannot be read at all (or a lost connection) is reported and does not stop the backup.
+# passwords and tokens. Keys the TV rejects are skipped and listed in the .err file.
+# The privacy settings this repository changes live in the essential categories: without them the
+# backup is FAILED, cannot be restored from, and backup/latest is not moved to it.
+essential=(general option other)
+captured=()
+missing=()
 for category in general option other picture sound network time lock caption channel aiPicture \
                 aspectRatio push support voiceframework timer; do
   if lgtv settings-get "$category" >"$dir/settings-$category.json" 2>"$dir/settings-$category.err"; then
     [[ -s "$dir/settings-$category.err" ]] || rm -f "$dir/settings-$category.err"
+    captured+=("$category")
   else
     echo "settings $category: not readable (see $dir/settings-$category.err)"
+    rm -f "$dir/settings-$category.json"
+    missing+=("$category")
   fi
+done
+
+failed_essential=()
+for category in "${essential[@]}"; do
+  [[ " ${captured[*]} " == *" $category "* ]] || failed_essential+=("$category")
 done
 
 if [[ -n "${ARES_DEVICE:-}" ]] && command -v ares-device >/dev/null; then
@@ -48,5 +60,22 @@ menu path and the value before, so it can be put back by hand.
 MD
 fi
 
+if [[ ${#failed_essential[@]} -gt 0 ]]; then
+  {
+    echo "FAILED"
+    echo "essential settings not captured: ${failed_essential[*]}"
+    echo "captured: ${captured[*]:-none}"
+  } >"$dir/STATUS"
+  echo "BACKUP FAILED: settings ${failed_essential[*]} were not captured; do not change the TV." >&2
+  echo "backup/latest was not updated. Check the connection and the .err files in $dir." >&2
+  exit 1
+fi
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+  printf 'PARTIAL\nnot captured: %s\n' "${missing[*]}" >"$dir/STATUS"
+  echo "backup is PARTIAL: ${missing[*]} not captured (essential categories are in)"
+else
+  echo "OK" >"$dir/STATUS"
+fi
 ln -sfn "$(basename "$dir")" "$(dirname "$dir")/latest"
 echo "backup written to $dir"

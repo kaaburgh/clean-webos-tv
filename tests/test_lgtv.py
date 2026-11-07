@@ -94,10 +94,12 @@ class FakeTv:
     """SSAP subset: pairing, apps, settings, the alert-based luna trick, screenshots, input socket."""
 
     def __init__(self):
-        self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"}}
+        self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"},
+                         "option": {"livePlus": "off"}, "other": {"contentRecommendation": "on"}}
         self.buttons = []
         self.alerts = {}
         self.alert_count = 0
+        self.settings_broken = False
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
         self.http = http.server.HTTPServer(("127.0.0.1", 0), self._image_handler())
@@ -145,7 +147,7 @@ class FakeTv:
             if uri == "settings/getSystemSettings":
                 cat = self.settings.get(p["category"], {})
                 # Like a real G5: no keys is an error, and so is any key this firmware lacks.
-                bad = "keys are mandatory." if not p.get("keys") else (
+                bad = "service unavailable" if self.settings_broken else "keys are mandatory." if not p.get("keys") else (
                     "unknown key" if any(k not in cat for k in p["keys"]) else None)
                 if bad:
                     await ws.send(json.dumps({"type": "error", "id": msg["id"], "error": "500 Application error",
@@ -280,10 +282,31 @@ class CliAgainstFakeTvTest(unittest.TestCase):
                                  capture_output=True, text=True, timeout=120)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o700)
+            with open(os.path.join(target, "STATUS")) as f:
+                self.assertEqual(f.readline().strip(), "PARTIAL")  # the fake TV lacks most categories
             path = os.path.join(target, "settings-general.json")
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             with open(path) as f:
                 self.assertEqual(json.load(f), {"homePromotion": "on"})
+
+    def test_02g_backup_fails_when_settings_are_unreadable(self):
+        self.cli("pair")
+        tools = os.path.join(os.path.dirname(__file__), "..", "tools")
+        self.tv.settings_broken = True
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = os.path.join(d, "backup")
+                target = os.path.join(root, "snap")
+                env = dict(os.environ, CLEAN_WEBOS_TV_HOME=self.home.name)
+                run = subprocess.run(["bash", os.path.join(tools, "backup.sh"), target], env=env,
+                                     capture_output=True, text=True, timeout=120)
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+                self.assertIn("BACKUP FAILED", run.stderr)
+                self.assertFalse(os.path.lexists(os.path.join(root, "latest")))
+                with open(os.path.join(target, "STATUS")) as f:
+                    self.assertTrue(f.read().startswith("FAILED"))
+        finally:
+            self.tv.settings_broken = False
 
     def test_03_settings_set_requires_log(self):
         with self.assertRaises(SystemExit):
