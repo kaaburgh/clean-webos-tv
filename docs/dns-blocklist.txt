@@ -1,0 +1,20 @@
+# Рекламные и ACR-домены LG для блокировки на роутере (Pi-hole, AdGuard Home, NextDNS и т.п.).
+# Собрано из открытых списков сообщества, не из документации LG: после блокировки проверьте
+# LG Content Store, вход в аккаунт LG и одно стриминговое приложение.
+#
+# НЕ блокируйте lgtvsdp.com, lgappstv.com и snu.lge.com: это магазин, вход и обновления.
+
+# Реклама
+lgsmartad.com
+ad.lgsmartad.com
+info.lgsmartad.com
+us.ad.lgsmartad.com
+eu.ad.lgsmartad.com
+us.info.lgsmartad.com
+eu.info.lgsmartad.com
+lgad.cjpowercast.com
+
+# Распознавание контента (Live Plus / ACR)
+ngfts.lge.com
+aic-ngfts.lge.com
+alphonso.tv
