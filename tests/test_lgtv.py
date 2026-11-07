@@ -5,6 +5,7 @@ import http.server
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -47,10 +48,12 @@ class PlanRestoreTest(unittest.TestCase):
 class ScreenshotDownloadTest(unittest.TestCase):
     def test_rejects_foreign_hosts_and_non_http_urls(self):
         invalid = [
-            "https://evil.example/image.jpg",
+            "https://evil.example:3001/image.jpg",
             "file:///tmp/image.jpg",
-            "https://user:password@192.168.1.50/image.jpg",
-            "https://192.168.1.50.evil.example/image.jpg",
+            "https://user:password@192.168.1.50:3001/image.jpg",
+            "https://192.168.1.50.evil.example:3001/image.jpg",
+            "https://192.168.1.51:3001/image.jpg",
+            "https://192.168.1.50:bad/image.jpg",
         ]
         with patch.object(lgtv.urllib.request, "build_opener") as mock_open:
             for url in invalid:
@@ -58,8 +61,38 @@ class ScreenshotDownloadTest(unittest.TestCase):
                     lgtv.download_screenshot(url, "192.168.1.50")
             mock_open.assert_not_called()
 
-    def test_https_uses_unverified_context_only_for_tv_image(self):
+    def test_foreign_hostname_is_not_resolved(self):
+        with patch.object(lgtv.socket, "getaddrinfo") as lookup:
+            with self.assertRaises(SystemExit):
+                lgtv.download_screenshot("https://evil.example:3001/image.jpg", "tv.local")
+            lookup.assert_not_called()
+
+    def test_tv_hostname_resolves_to_image_ip(self):
+        address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.50", 0))
+        with patch.object(lgtv.socket, "getaddrinfo", return_value=[address]) as lookup:
+            with patch.object(lgtv.urllib.request, "build_opener") as opener:
+                opener.return_value.open.return_value.__enter__.return_value.read.return_value = b"JPEG"
+                self.assertEqual(lgtv.download_screenshot("https://192.168.1.50:3001/capture.jpg",
+                                                          "LGwebOSTV.local"), b"JPEG")
+                lookup.assert_called_once_with("lgwebostv.local", None, type=socket.SOCK_STREAM)
+
+    def test_tv_hostname_must_resolve_to_image_ip(self):
+        address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.51", 0))
+        with patch.object(lgtv.socket, "getaddrinfo", return_value=[address]):
+            with patch.object(lgtv.urllib.request, "build_opener") as mock_open:
+                with self.assertRaises(SystemExit):
+                    lgtv.download_screenshot("https://192.168.1.50:3001/capture.jpg", "tv.local")
+                mock_open.assert_not_called()
+
+    def test_hostname_trailing_dot_is_accepted(self):
+        with patch.object(lgtv.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = b"JPEG"
+            self.assertEqual(lgtv.download_screenshot("https://tv.local.:3001/capture.jpg",
+                                                      "TV.LOCAL"), b"JPEG")
+
+    def test_https_uses_unverified_context_and_no_proxy(self):
         captured = {}
+        context = lgtv.ssl.create_default_context()
 
         class Opener:
             def open(self, url, timeout):
@@ -71,31 +104,27 @@ class ScreenshotDownloadTest(unittest.TestCase):
             captured["handlers"] = handlers
             return Opener()
 
-        with patch.object(lgtv.urllib.request, "build_opener", side_effect=build):
-            result = lgtv.download_screenshot("https://192.168.1.50:3001/capture.jpg", "192.168.1.50")
+        with patch.object(lgtv.ssl, "create_default_context", return_value=context) as make_context:
+            with patch.object(lgtv.urllib.request, "build_opener", side_effect=build):
+                result = lgtv.download_screenshot("https://192.168.1.50:3001/capture.jpg", "192.168.1.50")
 
         self.assertEqual(result, b"JPEG")
         self.assertEqual(captured["timeout"], 20)
-        https = next(h for h in captured["handlers"] if isinstance(h, lgtv.urllib.request.HTTPSHandler))
-        self.assertFalse(https._context.check_hostname)
-        self.assertEqual(https._context.verify_mode, lgtv.ssl.CERT_NONE)
+        make_context.assert_called_once_with()
+        self.assertFalse(context.check_hostname)
+        self.assertEqual(context.verify_mode, lgtv.ssl.CERT_NONE)
+        self.assertTrue(any(isinstance(h, lgtv.urllib.request.HTTPSHandler) for h in captured["handlers"]))
         self.assertTrue(any(isinstance(h, lgtv._NoScreenshotRedirect) for h in captured["handlers"]))
+        self.assertTrue(any(isinstance(h, lgtv.urllib.request.ProxyHandler) and h.proxies == {}
+                            for h in captured["handlers"]))
 
-    def test_http_does_not_disable_certificate_checks(self):
-        captured = {}
-
-        class Opener:
-            def open(self, url, timeout):
-                return io.BytesIO(b"JPEG")
-
-        def build(*handlers):
-            captured["handlers"] = handlers
-            return Opener()
-
-        with patch.object(lgtv.urllib.request, "build_opener", side_effect=build):
-            self.assertEqual(lgtv.download_screenshot("http://192.168.1.50/capture.jpg", "192.168.1.50"), b"JPEG")
-        https = next(h for h in captured["handlers"] if isinstance(h, lgtv.urllib.request.HTTPSHandler))
-        self.assertEqual(https._context.verify_mode, lgtv.ssl.CERT_REQUIRED)
+    def test_http_does_not_create_unverified_context(self):
+        with patch.object(lgtv.ssl, "create_default_context") as make_context:
+            with patch.object(lgtv.urllib.request, "build_opener") as opener:
+                opener.return_value.open.return_value.__enter__.return_value.read.return_value = b"JPEG"
+                self.assertEqual(lgtv.download_screenshot("http://192.168.1.50:3000/capture.jpg",
+                                                          "192.168.1.50"), b"JPEG")
+            make_context.assert_not_called()
 
     def test_http_redirect_is_not_followed(self):
         paths = []
@@ -104,7 +133,7 @@ class ScreenshotDownloadTest(unittest.TestCase):
             def do_GET(self):  # noqa: N802
                 paths.append(self.path)
                 self.send_response(302)
-                self.send_header("Location", "/redirected")
+                self.send_header("Location", "/redirected?token=secret")
                 self.end_headers()
 
             def log_message(self, *args):
@@ -115,14 +144,25 @@ class ScreenshotDownloadTest(unittest.TestCase):
         thread.start()
         try:
             url = f"http://127.0.0.1:{server.server_port}/capture.jpg"
-            with self.assertRaises(urllib.error.HTTPError) as err:
+            with self.assertRaises(SystemExit) as err:
                 lgtv.download_screenshot(url, "127.0.0.1")
-            self.assertEqual(err.exception.code, 302)
+            self.assertIn("refusing screenshot redirect (HTTP 302)", str(err.exception))
+            self.assertNotIn("secret", str(err.exception))
             self.assertEqual(paths, ["/capture.jpg"])
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_download_http_error_is_readable(self):
+        with patch.object(lgtv.urllib.request, "build_opener") as opener:
+            opener.return_value.open.side_effect = urllib.error.HTTPError(
+                "http://192.168.1.50:3000/capture.jpg", 403, "Forbidden", {}, None)
+            with self.assertRaises(SystemExit) as err:
+                lgtv.download_screenshot("http://192.168.1.50:3000/capture.jpg", "192.168.1.50")
+            self.assertIn("screenshot download failed: HTTP 403", str(err.exception))
+
+
 
 
 class FakeTv:
@@ -285,6 +325,20 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             with open(path, "rb") as f:
                 self.assertEqual(f.read(), b"\xff\xd8JPEG")
         self.assertEqual(self.tv.buttons[-2:], ["HOME", "DOWN"])
+
+    def test_04b_screenshot_with_cli_host_and_no_environment_host(self):
+        self.cli("pair")
+        saved = os.environ.pop("TV_HOST", None)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "s.jpg")
+                code, _, _ = self.cli("--host", "127.0.0.1", "screenshot", path)
+                self.assertEqual(code, 0)
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), b"\xff\xd8JPEG")
+        finally:
+            if saved is not None:
+                os.environ["TV_HOST"] = saved
 
 
 if __name__ == "__main__":
