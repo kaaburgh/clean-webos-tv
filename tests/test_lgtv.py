@@ -54,6 +54,7 @@ class ScreenshotDownloadTest(unittest.TestCase):
             "https://192.168.1.50.evil.example:3001/image.jpg",
             "https://192.168.1.51:3001/image.jpg",
             "https://192.168.1.50:bad/image.jpg",
+            "https://192.168.1.50:0/image.jpg",
         ]
         with patch.object(lgtv.urllib.request, "build_opener") as mock_open:
             for url in invalid:
@@ -117,6 +118,12 @@ class ScreenshotDownloadTest(unittest.TestCase):
         self.assertTrue(any(isinstance(h, lgtv._NoScreenshotRedirect) for h in captured["handlers"]))
         self.assertTrue(any(isinstance(h, lgtv.urllib.request.ProxyHandler) and h.proxies == {}
                             for h in captured["handlers"]))
+
+    def test_default_http_port_is_accepted(self):
+        with patch.object(lgtv.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = b"JPEG"
+            self.assertEqual(lgtv.download_screenshot("http://192.168.1.50/capture.jpg",
+                                                      "192.168.1.50"), b"JPEG")
 
     def test_http_does_not_create_unverified_context(self):
         with patch.object(lgtv.ssl, "create_default_context") as make_context:
