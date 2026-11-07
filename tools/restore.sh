@@ -20,6 +20,12 @@ if [[ -f "$dir/manual.md" ]]; then
   cat "$dir/manual.md"
 fi
 
+if [[ -s "$dir/menu/values.jsonl" ]]; then
+  echo
+  echo "Menu settings as they were at backup time (screenshots in $dir/menu/); put back by hand:"
+  python3 "$here/menu_backup.py" show "$dir"
+fi
+
 if [[ -f "$dir/apps-all.json" ]]; then
   echo
   echo "Apps installed at backup time but missing now (reinstall them from LG Content Store):"

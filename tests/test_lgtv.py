@@ -82,15 +82,27 @@ class SettingsReaderTest(unittest.TestCase):
         self.assertLessEqual(client.calls, 2 * 6 + 1)
 
     def test_bulk_reads_leave_out_pins_passwords_and_tokens(self):
-        lock = lgtv.known_keys("lock")
-        option = lgtv.known_keys("option")
-        voice = lgtv.known_keys("voiceframework")
-        for key in ("systemPinCode", "camPinCode", "initialPinCode", "systemPin"):
-            self.assertNotIn(key, lock)
-        for key in ("password_ipcontrol", "IPControlSecureKey"):
-            self.assertNotIn(key, option)
-        self.assertNotIn("googleAssistantStateToken", voice)
-        self.assertIn("livePlus", option)
+        table = {"lock": ["systemPinCode", "camPinCode", "initialPinCode", "systemPin", "secretMode"],
+                 "option": ["password_ipcontrol", "IPControlSecureKey", "livePlus"],
+                 "voiceframework": ["googleAssistantStateToken", "voice_mic"]}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "keys.json")
+            with open(path, "w") as f:
+                json.dump(table, f)
+            old, lgtv.KEYS_FILE = lgtv.KEYS_FILE, path
+            try:
+                self.assertEqual(lgtv.known_keys("lock"), ["secretMode"])
+                self.assertEqual(lgtv.known_keys("option"), ["livePlus"])
+                self.assertEqual(lgtv.known_keys("voiceframework"), ["voice_mic"])
+            finally:
+                lgtv.KEYS_FILE = old
+
+    def test_bundled_g5_list_has_no_sensitive_keys(self):
+        with open(lgtv.KEYS_FILE) as f:
+            table = json.load(f)
+        for cat, keys in table.items():
+            if not cat.startswith("_"):
+                self.assertEqual([k for k in keys if lgtv.SENSITIVE_KEY_RE.search(k)], [], cat)
 
 
 class ScreenshotDownloadTest(unittest.TestCase):
@@ -225,7 +237,7 @@ class FakeTv:
 
     def __init__(self):
         self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"},
-                         "option": {"livePlus": "off"}, "other": {"contentRecommendation": "on"}}
+                         "option": {"livePlus": "off"}, "other": {"simplinkEnable": "on"}}
         self.buttons = []
         self.alerts = {}
         self.alert_count = 0
@@ -399,7 +411,7 @@ class CliAgainstFakeTvTest(unittest.TestCase):
         with open(lgtv.KEYS_FILE) as f:
             table = json.load(f)
         for cat, key in (("general", "homeAutoLaunch"), ("general", "homePromotion"), ("option", "livePlus"),
-                         ("other", "contentRecommendation")):
+                         ("support", "automaticUpdate")):
             self.assertIn(key, table[cat])
 
     def test_02f_backup_is_private_and_reads_settings(self):
@@ -413,7 +425,11 @@ class CliAgainstFakeTvTest(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o700)
             with open(os.path.join(target, "STATUS")) as f:
-                self.assertEqual(f.readline().strip(), "PARTIAL")  # the fake TV lacks most categories
+                status = f.read().splitlines()
+                self.assertEqual(status[0], "network=PARTIAL")  # the fake TV lacks most categories
+                self.assertTrue(status[-1].startswith("menu=INCOMPLETE"), status)
+            self.assertIn("menu-only settings are NOT backed up yet", run.stdout)
+            self.assertIn("viewing-information", run.stdout)
             path = os.path.join(target, "settings-general.json")
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             with open(path) as f:
@@ -434,7 +450,7 @@ class CliAgainstFakeTvTest(unittest.TestCase):
                 self.assertIn("BACKUP FAILED", run.stderr)
                 self.assertFalse(os.path.lexists(os.path.join(root, "latest")))
                 with open(os.path.join(target, "STATUS")) as f:
-                    self.assertTrue(f.read().startswith("FAILED"))
+                    self.assertTrue(f.read().startswith("network=FAILED"))
         finally:
             self.tv.settings_broken = False
 
