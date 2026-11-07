@@ -195,8 +195,10 @@ def download_screenshot(uri, expected_host):
     """
     try:
         parsed = urlsplit(uri)
+        # Reading parsed.port also rejects malformed/non-numeric explicit ports.
+        port = parsed.port
         valid_url = (parsed.scheme in ("http", "https") and
-                     parsed.port is not None and
+                     (port is None or port > 0) and
                      parsed.username is None and parsed.password is None and
                      _matches_tv_host(parsed.hostname, expected_host))
     except ValueError:
