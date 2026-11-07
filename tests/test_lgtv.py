@@ -82,15 +82,27 @@ class SettingsReaderTest(unittest.TestCase):
         self.assertLessEqual(client.calls, 2 * 6 + 1)
 
     def test_bulk_reads_leave_out_pins_passwords_and_tokens(self):
-        lock = lgtv.known_keys("lock")
-        option = lgtv.known_keys("option")
-        voice = lgtv.known_keys("voiceframework")
-        for key in ("systemPinCode", "camPinCode", "initialPinCode", "systemPin"):
-            self.assertNotIn(key, lock)
-        for key in ("password_ipcontrol", "IPControlSecureKey"):
-            self.assertNotIn(key, option)
-        self.assertNotIn("googleAssistantStateToken", voice)
-        self.assertIn("livePlus", option)
+        table = {"lock": ["systemPinCode", "camPinCode", "initialPinCode", "systemPin", "secretMode"],
+                 "option": ["password_ipcontrol", "IPControlSecureKey", "livePlus"],
+                 "voiceframework": ["googleAssistantStateToken", "voice_mic"]}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "keys.json")
+            with open(path, "w") as f:
+                json.dump(table, f)
+            old, lgtv.KEYS_FILE = lgtv.KEYS_FILE, path
+            try:
+                self.assertEqual(lgtv.known_keys("lock"), ["secretMode"])
+                self.assertEqual(lgtv.known_keys("option"), ["livePlus"])
+                self.assertEqual(lgtv.known_keys("voiceframework"), ["voice_mic"])
+            finally:
+                lgtv.KEYS_FILE = old
+
+    def test_bundled_g5_list_has_no_sensitive_keys(self):
+        with open(lgtv.KEYS_FILE) as f:
+            table = json.load(f)
+        for cat, keys in table.items():
+            if not cat.startswith("_"):
+                self.assertEqual([k for k in keys if lgtv.SENSITIVE_KEY_RE.search(k)], [], cat)
 
 
 class ScreenshotDownloadTest(unittest.TestCase):
@@ -225,7 +237,7 @@ class FakeTv:
 
     def __init__(self):
         self.settings = {"general": {"homePromotion": "on", "contentRecommendation": "on"},
-                         "option": {"livePlus": "off"}, "other": {"contentRecommendation": "on"}}
+                         "option": {"livePlus": "off"}, "other": {"simplinkEnable": "on"}}
         self.buttons = []
         self.alerts = {}
         self.alert_count = 0
@@ -399,7 +411,7 @@ class CliAgainstFakeTvTest(unittest.TestCase):
         with open(lgtv.KEYS_FILE) as f:
             table = json.load(f)
         for cat, key in (("general", "homeAutoLaunch"), ("general", "homePromotion"), ("option", "livePlus"),
-                         ("other", "contentRecommendation")):
+                         ("support", "automaticUpdate")):
             self.assertIn(key, table[cat])
 
     def test_02f_backup_is_private_and_reads_settings(self):

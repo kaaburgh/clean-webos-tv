@@ -17,16 +17,16 @@ lgtv info >"$dir/info.json"
 lgtv apps >"$dir/launch-points.json"
 lgtv apps --all >"$dir/apps-all.json"
 
-# The settings service refuses reads without explicit keys, so lgtv.py asks for every key known
-# for the category (tools/settings-keys/G5.json, override with TV_SETTINGS_KEYS), except PINs,
-# passwords and tokens. Keys the TV rejects are skipped and listed in the .err file.
+# The settings service refuses reads without explicit keys and lets only a whitelist of keys
+# through the network API, so lgtv.py asks for the keys a real G5 answered
+# (tools/settings-keys/G5.json, override with TV_SETTINGS_KEYS), never PINs, passwords or tokens. Keys the TV rejects are skipped and listed in the .err file.
 # The privacy settings this repository changes live in the essential categories: without them the
 # backup is FAILED, cannot be restored from, and backup/latest is not moved to it.
 essential=(general option other)
 captured=()
 missing=()
-for category in general option other picture sound network time lock caption channel aiPicture \
-                aspectRatio push support voiceframework timer; do
+# On a G5 only these categories have keys the network API lets through (see the key file).
+for category in general option other picture sound network time lock support; do
   if lgtv settings-get "$category" >"$dir/settings-$category.json" 2>"$dir/settings-$category.err"; then
     [[ -s "$dir/settings-$category.err" ]] || rm -f "$dir/settings-$category.err"
     captured+=("$category")
