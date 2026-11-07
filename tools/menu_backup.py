@@ -108,6 +108,28 @@ def record(backup, setting, value, screenshot, path=None, note=None, replace_bas
     return entry
 
 
+def status_line(backup, wanted):
+    """The live menu=... line, and whether every item was investigated."""
+    done = summary(backup)
+    ready = [i for i in wanted if restorable(backup, done.get(i))]
+    unavailable = [i for i in wanted if i in done and not done[i]["baseline"]]
+    left = [i for i in wanted if i not in done]
+    state = "COMPLETE" if not left else "INCOMPLETE"
+    return f"menu={state} baselines={len(ready)} unavailable={len(unavailable)} not_investigated={len(left)}", not left
+
+
+def refresh_status_file(backup, wanted):
+    """Keep the menu= line of <backup>/STATUS current after each record (backup.sh writes it once)."""
+    path = os.path.join(backup, "STATUS")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        lines = [l for l in f.read().splitlines() if not l.startswith("menu=")]
+    lines.append(status_line(backup, wanted)[0])
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--list-file", help="settings list (default tools/menu-settings/G5.json or $TV_MENU_SETTINGS)")
@@ -131,6 +153,7 @@ def main(argv=None):
             raise SystemExit(f"unknown id {args.id!r}; known: {', '.join(wanted)}")
         entry = record(args.backup, wanted[args.id], args.value, args.screenshot, args.path, args.note,
                        args.replace_baseline)
+        refresh_status_file(args.backup, wanted)
         print(f"recorded {entry['kind']} {entry['id']} = {entry['value']} (menu/{entry['screenshot']})")
         return 0
     done = summary(args.backup)
@@ -142,12 +165,9 @@ def main(argv=None):
     if args.cmd == "has":
         return 0 if restorable(args.backup, done.get(args.id)) else 1
     if args.cmd == "status":
-        ready = [i for i in wanted if restorable(args.backup, done.get(i))]
-        unavailable = [i for i in wanted if i in done and not done[i]["baseline"]]
-        left = [i for i in wanted if i not in done]
-        state = "COMPLETE" if not left else "INCOMPLETE"
-        print(f"menu={state} baselines={len(ready)} unavailable={len(unavailable)} not_investigated={len(left)}")
-        return 0 if not left else 1
+        line, complete = status_line(args.backup, wanted)
+        print(line)
+        return 0 if complete else 1
     if args.cmd == "show":
         if not done:
             print("  no menu settings were recorded")

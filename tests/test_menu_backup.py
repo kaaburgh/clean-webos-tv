@@ -115,6 +115,15 @@ class MenuBackupTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("menu=COMPLETE baselines=1 unavailable=8", out)
 
+    def test_record_keeps_status_file_current(self):
+        status = os.path.join(self.backup, "STATUS")
+        with open(status, "w", encoding="utf-8") as f:
+            f.write("network=OK\nmenu=INCOMPLETE baselines=0 unavailable=0 not_investigated=9\n")
+        self.cli("record", self.backup, "sports-alerts", "on", self.shot)
+        with open(status, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines, ["network=OK", "menu=INCOMPLETE baselines=1 unavailable=0 not_investigated=8"])
+
     def test_refuses_record_without_picture_or_value_or_known_id(self):
         for args in (("ad-tracking", "off", os.path.join(self.tmp.name, "nope.jpg")),
                      ("ad-tracking", " ", self.shot),
